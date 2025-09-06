@@ -1,0 +1,11 @@
+{
+	"servers": {
+		
+		"librarian-cloud-relay": {
+			"type": "stdio",
+			"command": "D:/anaconda3/envs/doc/python.exe",
+			"args": ["D:/Downloads/Projects/My College Projects/documentation fetcher/mcp_stdio_server.py"]
+		}                                               
+	},
+	"inputs": []
+}
