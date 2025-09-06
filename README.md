@@ -1,6 +1,20 @@
 # Librarian
 
-“Your personal AI librarian that never stops searching for the documentation you need.”
+"Your personal AI librarian that never stops searching for the documentation you need."
+
+> Status: Core ingestion + self‑correcting pipeline + cloud + stdio MCP integration working. Ongoing: broader MCP feature surface & editor plugins.  
+> License: (none yet—add one before public release)
+
+## TL;DR
+Give me a library name (PyPI / npm / crates.io). I:  
+1. Discover the richest real docs page (not a thin homepage)  
+2. Fast-scrape via Jina AI  
+3. If weak → deep crawl with Crawl4ai  
+4. Embed & refresh Pinecone (cosine, 384D)  
+5. Run RAG + confidence scoring  
+6. Serve structured results via:  
+	 - Local MCP (stdio) server (`mcp_stdio_server.py`)  
+	 - Cloud endpoints (`/process_library`, `/ask`) at `LIBRARIAN_CLOUD_URL`our personal AI librarian that never stops searching for the documentation you need.”
 
 > Status: Core ingestion + self‑correcting pipeline + cloud + stdio MCP integration working. Ongoing: broader MCP feature surface & editor plugins.  
 > License: (none yet—add one before public release)
@@ -21,13 +35,13 @@ Give me a library name (PyPI / npm / crates.io). I:
 ## 🔧 Implemented Capabilities
 
 - Multi‑ecosystem resolution (PyPI, npm, crates.io)
-- Intelligent documentation URL selection (Gemini 1.5 Flash + search)
+- Intelligent documentation URL selection (Groq Llama 3.1 + search)
 - Fast initial content extraction (Jina AI Reader)
 - Confidence scoring + conditional deep crawl fallback (Crawl4ai)
 - Deep multi‑page aggregation
 - Vector refresh (delete old → upsert new) in Pinecone serverless:
-	- Index: `mcp-documentation-index` (cosine, dim=768, us-east-1)
-- Gemini reasoning & structured summarization
+	- Index: `mcp-documentation-index-groq` (cosine, dim=384, us-east-1)
+- Groq Llama 3.1 reasoning & structured summarization
 - Cache gated by confidence (Medium/High only)
 - Dual operation modes: Local MCP stdio + Cloud HTTP service
 
@@ -94,7 +108,7 @@ sequenceDiagram
 		participant H as Handler
 		participant P as Pinecone
 		participant R as Retriever
-		participant G as Gemini
+		participant G as Groq
 		C->>H: ask(library, question)
 		H->>P: similarity query
 		P-->>H: top-k chunks
@@ -108,7 +122,7 @@ sequenceDiagram
 
 ## 🧠 Discovery Strategy
 
-- Reasoning model: `gemini-1.5-flash`
+- Reasoning model: `llama-3.1-8b-instant` (Groq)
 - Search order: Ecosystem metadata → DuckDuckGo queries → Tavily fallback
 - URL scoring heuristics: Penalize marketing roots; prefer pages with heading density, code blocks, versioned paths; reject empty stubs.
 
@@ -127,8 +141,8 @@ sequenceDiagram
 
 | Concern | Choice |
 |---------|--------|
-| Reasoning & extraction logic | Gemini 1.5 Flash |
-| Embeddings (768D) | Gemini embeddings endpoint |
+| Reasoning & extraction logic | Groq Llama 3.1 8B Instant |
+| Embeddings (384D) | BAAI/bge-small-en-v1.5 (FastEmbed) |
 | Fast scrape | Jina AI Reader |
 | Deep crawl | Crawl4ai (`crawl4ai-setup` installs Chromium) |
 | Search | DuckDuckGo (primary), Tavily (fallback) |
@@ -143,18 +157,15 @@ sequenceDiagram
 (Do NOT commit real key values. Rotate any leaked keys immediately.)
 
 ```
-GEMINI_API_KEY=your_gemini_key
-GEMINI_MODEL=gemini-1.5-flash
+GROQ_API_KEY=your_groq_key
 PINECONE_API_KEY=your_pinecone_key
-PINECONE_INDEX=mcp-documentation-index
+PINECONE_INDEX=mcp-documentation-index-groq
 PINECONE_REGION=us-east-1
 TAVILY_API_KEY=your_tavily_key
 LIBRARIAN_CLOUD_URL=https://librarian-ai-agent-...run.app/
 # Optional / future:
 # CACHE_DIR=.cache/librarian
 ```
-
-If you still have `GOOGLE_API_KEY` logic, keep it; remove if unused.
 
 ---
 
@@ -237,8 +248,9 @@ print(q.json())
 | Crawl errors | Chromium missing | Re-run `crawl4ai-setup` |
 | Pinecone auth failure | Wrong key/region/index | Verify env values |
 | Repeated Low confidence | Poor URL selection | Refine heuristics / add denylist |
-| Slow first run | Chromium + warm start | Subsequent runs faster |
+| Slow first run | Model download + warm start | Subsequent runs faster |
 | MCP stdio not spawning | Wrong Python path | Fix `.vscode/mcp.json` command |
+| Embedding model errors | Model not downloaded | Check Docker build or run download manually |
 
 ---
 
@@ -290,15 +302,15 @@ None yet—add one (e.g., MIT or Apache-2.0) before external contributions.
 process_library(tokio)
  → discovery selects https://docs.rs/tokio
  → jina scrape (enough?) if not → deep crawl
- → vectors refreshed (Pinecone cosine 768D)
+ → vectors refreshed (Pinecone cosine 384D)
  → structured summary (confidence: High)
 
 ask(tokio, "How do I spawn tasks?")
- → retrieve top-k → Gemini synthesis with source context
+ → retrieve top-k → Groq Llama 3.1 synthesis with source context
 ```
 
 ---
 
 ## ✅ Summary
 
-Librarian delivers a resilient, self-correcting documentation ingestion + RAG stack with dual local (MCP stdio) and cloud operation modes, leveraging Gemini + Jina + Crawl4ai + Pinecone to keep results fresh and high quality.
+Librarian delivers a resilient, self-correcting documentation ingestion + RAG stack with dual local (MCP stdio) and cloud operation modes, leveraging Groq Llama 3.1 + Jina + Crawl4ai + Pinecone to keep results fresh and high quality.
