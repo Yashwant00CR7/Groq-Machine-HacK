@@ -50,7 +50,7 @@ Give me a library name (PyPI / npm / crates.io). I:
 ### High-Level Data Flow
 1. Request (MCP stdio or Cloud HTTP)
 2. Ecosystem metadata fetch
-3. Candidate docs discovery (Gemini + DuckDuckGo + Tavily fallback)
+3. Candidate docs discovery (Groq Llama 3.1 + DuckDuckGo + Tavily fallback)
 4. Initial scrape (Jina)
 5. Content quality + confidence evaluation
 6. (Optional) Deep crawl (Crawl4ai)
@@ -89,7 +89,7 @@ Give me a library name (PyPI / npm / crates.io). I:
 flowchart LR
     A["Client (MCP / Cloud)"] --> B["Request Handler"]
     B --> C["Library Resolver<br/>(PyPI / npm / Crates)"]
-    C --> D["URL Discovery Agent<br/>Gemini + DuckDuckGo + Tavily"]
+    C --> D["URL Discovery Agent<br/>Groq Llama 3.1 + DuckDuckGo + Tavily"]
     D --> E["Jina Fast Scrape"]
     E --> F{"Confidence High?"}
     F -- "Yes" --> H["Chunk & Embed"]
@@ -162,7 +162,7 @@ PINECONE_API_KEY=your_pinecone_key
 PINECONE_INDEX=mcp-documentation-index-groq
 PINECONE_REGION=us-east-1
 TAVILY_API_KEY=your_tavily_key
-LIBRARIAN_CLOUD_URL=https://librarian-ai-agent-...run.app/
+LIBRARIAN_CLOUD_URL=https://librarian-ai-agent-groq-180553692497.us-central1.run.app/
 # Optional / future:
 # CACHE_DIR=.cache/librarian
 ```
@@ -208,6 +208,8 @@ ask: { "library_name": "tokio", "question": "How do I create a TCP server?" }
 ---
 
 ## ☁️ Cloud HTTP Mode
+
+**🚀 Live Demo:** [https://librarian-ai-agent-groq-180553692497.us-central1.run.app/docs](https://librarian-ai-agent-groq-180553692497.us-central1.run.app/docs)
 
 Base: `${LIBRARIAN_CLOUD_URL}`
 
