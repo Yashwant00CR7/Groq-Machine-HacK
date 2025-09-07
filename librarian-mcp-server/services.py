@@ -107,7 +107,7 @@ def initialize_services():
         model_name="meta-llama/llama-4-scout-17b-16e-instruct"  # Vision-capable model for images
     )
     
-    cache_dir = os.path.join(os.path.dirname(__file__), ".embeddings_cache")
+    cache_dir = os.path.join(os.path.expanduser("~"), ".embeddings_cache")
     os.makedirs(cache_dir, exist_ok=True)
     embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5", cache_dir=cache_dir)
     
@@ -609,7 +609,7 @@ def find_documentation_url(agent_executor, library_name: str) -> str | None:
 async def process_image_and_identify_library(vision_llm: ChatGroq, image_bytes: bytes, prompt: str) -> Optional[str]:
     """
     Processes an image to identify a software library using a vision-capable LLM.
-    Uses the dedicated vision model (llama-3.2-11b-vision-preview) for image processing.
+    Uses the dedicated vision model (meta-llama/llama-4-scout-17b-16e-instruct) for image processing.
     """
     logger.info("🖼️ Processing image to identify software library with vision model...")
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')

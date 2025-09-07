@@ -73,12 +73,18 @@ Give me a library name (PyPI / npm / crates.io). I:
 | `.env` | Local secrets (never commit real values) |
 
 ### Conceptual Data Models
-- LibraryRequest { name, ecosystem? }
-- LibraryMetadata { name, version?, homepage?, candidates[] }
-- PageContent { url, raw_text, source(jina|crawl4ai), quality_score }
-- Chunk { id, library, text, embedding }
-- LibraryInfo { library_name, summary, documentation_url, confidence_score, additional_insights }
-- AskAnswer { answer, citations[], confidence }
+
+## 🔄 Two-Way Model Communication in API
+
+The API now supports robust two-way communication between the orchestrator and both text and vision models:
+
+- **Text Model (Groq Llama 3.1):** Handles all text-based reasoning, documentation extraction, and RAG workflows. The orchestrator sends queries and receives structured responses, including confidence scores and extracted metadata.
+- **Vision Model (Meta Llama 4 Scout):** Used for image-based library identification. The orchestrator can send image data and prompts, receiving back the identified library name or related metadata.
+- **Dynamic Model Selection:** The orchestrator chooses the appropriate model (text or vision) based on the input type (text or image), enabling seamless multi-modal support.
+- **Structured Output:** Both models return structured data, which is then used for downstream tasks like caching, embedding, and serving answers.
+- **Error Handling:** The orchestrator manages model errors and fallbacks, ensuring reliability in both directions.
+
+This two-way communication enables richer, multi-modal documentation search and Q&A, supporting both textual and visual queries in the same pipeline.
 
 ---
 
