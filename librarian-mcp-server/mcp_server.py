@@ -1,28 +1,30 @@
 # --- MCP Server: Main Entry Point ---
 # This file creates a FastAPI web server to expose the Librarian's capabilities
 # as a Model Context Protocol (MCP) server.
+import asyncio
+import sys
 
+# FIX: For Playwright/asyncio issues on Windows
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 import os
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
 # --- Local Imports from your project ---
-# These functions contain the core intelligence of the Librarian.
+# We now import the main orchestrator functions, not the individual components.
 from services import (
     initialize_services,
-    create_universal_agent,
     ensure_pinecone_index_ready,
-    extract_structured_info,
-    load_from_cache,
-    save_to_cache,
-    interpret_confidence_score,
+    run_full_pipeline,
+    process_image_and_identify_library,
     logger,
     PineconeVectorStore,
     _sanitize_filename,
-    find_documentation_url
+    PINECONE_INDEX_NAME
 )
 
 # --- Data Models for API Requests ---
@@ -36,12 +38,13 @@ class AskRequest(BaseModel):
     question: str
 
 # --- Global State Management ---
+# This dictionary will hold our initialized services.
 server_state = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    This function runs on server startup and shutdown to initialize models and services.
+    This function runs on server startup to initialize models and services.
     """
     print("--- Server is starting up... ---")
     load_dotenv()
@@ -49,19 +52,17 @@ async def lifespan(app: FastAPI):
     try:
         llm, embeddings_model, pc = initialize_services()
         ensure_pinecone_index_ready(pc, embeddings_model)
-        agent_executor = create_universal_agent(llm)
         
+        # Store the initialized services in the global state
         server_state["llm"] = llm
         server_state["embeddings_model"] = embeddings_model
-        server_state["agent_executor"] = agent_executor
+        server_state["pc"] = pc
         
         print("--- Models and services initialized. Server is ready. ---")
         print("🌐 Server URL: http://localhost:8080")
         print("📖 API Documentation: http://localhost:8080/docs")
     except Exception as e:
-        # If initialization fails, log the error. The server won't start correctly.
         logger.critical(f"FATAL: Server startup failed during initialization: {e}")
-        # In a real production scenario, you might want to exit or handle this differently.
     
     yield
     
@@ -80,65 +81,75 @@ app = FastAPI(
 
 @app.get("/")
 async def root():
-    """
-    Root endpoint to check if the server is running.
-    """
+    """Root endpoint to check if the server is running."""
     return {"message": "Librarian MCP Server running", "status": "healthy"}
 
-@app.post("/process_library", response_model=dict)
-async def process_library_endpoint(request: ProcessRequest):
+@app.post("/process", response_model=dict)
+async def process_text_endpoint(request: ProcessRequest):
     """
-    This endpoint runs the full Librarian pipeline for a given library name.
+    This endpoint runs the full Librarian pipeline for a given library name from text.
     """
     library_name = request.library_name
-    logger.info(f"Received request to process library: {library_name}")
+    logger.info(f"Received text request to process library: {library_name}")
 
     try:
-        # 1. Check Cache
-        cached_data = load_from_cache(library_name)
-        if cached_data:
-            logger.info(f"Cache hit for '{library_name}'. Returning cached data.")
-            return cached_data
-
-        # 2. Find URL with the Agent
-        doc_url = find_documentation_url(server_state["agent_executor"], library_name)
-        if not doc_url:
-            raise HTTPException(status_code=404, detail=f"Agent failed to find a valid URL for '{library_name}'.")
-
-        # 3. Extract Info (this function contains the full ingestion and fallback logic)
-        # CORRECTED: Added 'await' to properly call the asynchronous function
-        library_info = await extract_structured_info(
+        result = await run_full_pipeline(
             library_name=library_name,
             llm=server_state["llm"],
             embeddings_model=server_state["embeddings_model"],
-            doc_url=doc_url
+            pc=server_state["pc"]
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Failed to process library '{library_name}'. See logs for details.")
+        return result
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in /process for '{library_name}': {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+@app.post("/process_image", response_model=dict)
+async def process_image_endpoint(prompt: str = Form("Identify the primary software library in this image."), image: UploadFile = File(...)):
+    """
+    This endpoint identifies a library from an image, then runs the full pipeline.
+    """
+    logger.info(f"Received image request with prompt: '{prompt}'")
+    
+    try:
+        # Read image bytes from the uploaded file
+        image_bytes = await image.read()
+
+        # 1. Identify the library name from the image
+        identified_name = await process_image_and_identify_library(
+            llm=server_state["llm"],
+            image_bytes=image_bytes,
+            prompt=prompt
         )
 
-        if not library_info:
-            raise HTTPException(status_code=500, detail="Failed to extract structured information after ingestion.")
+        if not identified_name:
+            raise HTTPException(status_code=400, detail="Could not identify a library name from the provided image.")
 
-        # 4. Save to cache ONLY if confidence is high or medium
-        info_dict = library_info.model_dump()
-        if library_info.confidence_score and library_info.confidence_score.lower() in ["high", "medium"]:
-            save_to_cache(library_name, info_dict)
-        else:
-            logger.warning(f"Skipping cache for '{library_name}' due to low or unknown confidence.")
+        logger.info(f"Image identified as '{identified_name}'. Starting full pipeline...")
 
-        return info_dict
-    
-    except HTTPException as http_exc:
-        # Re-raise HTTP exceptions directly
-        raise http_exc
+        # 2. Run the full text-based pipeline with the identified name
+        result = await run_full_pipeline(
+            library_name=identified_name,
+            llm=server_state["llm"],
+            embeddings_model=server_state["embeddings_model"],
+            pc=server_state["pc"]
+        )
+
+        if not result:
+            raise HTTPException(status_code=404, detail=f"Successfully identified '{identified_name}' from image, but failed to process it.")
+        return result
+
     except Exception as e:
-        # Catch any other unexpected errors and return a proper 500 error
-        logger.error(f"An unexpected error occurred in /process_library for '{library_name}': {e}")
+        logger.error(f"An unexpected error occurred in /process_image: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
 
 @app.post("/ask", response_model=dict)
 async def ask_endpoint(request: AskRequest):
     """
-    This is the RAG endpoint. It answers a question about a library
-    by retrieving relevant context from the Pinecone database.
+    This is the RAG endpoint. It answers a question about a library.
     """
     library_name = request.library_name
     question = request.question
@@ -146,7 +157,7 @@ async def ask_endpoint(request: AskRequest):
 
     try:
         vectorstore = PineconeVectorStore.from_existing_index(
-            index_name=os.getenv("PINECONE_INDEX_NAME", "mcp-documentation-index"),
+            index_name=PINECONE_INDEX_NAME,
             embedding=server_state["embeddings_model"]
         )
 
@@ -155,16 +166,17 @@ async def ask_endpoint(request: AskRequest):
             search_kwargs={'k': 5, 'filter': {'doc_id': doc_id}}
         )
 
-        docs = retriever.invoke(question)
+        docs = await retriever.ainvoke(question)
 
         if not docs:
-            return {"answer": "I could not find any relevant information in the documentation for that library. It might not have been processed yet."}
+            return {"answer": "I could not find any relevant information in the documentation for that library. It might not have been processed yet or the name is incorrect."}
 
         context = "\n\n---\n\n".join([doc.page_content for doc in docs])
         
+        # Here you would typically pass the context and question to an LLM to generate a natural language answer.
+        # For this example, we return the raw context.
         return {
-            "library": library_name,
-            "question": question,
+            "answer": f"Based on the documentation for {library_name}, here is some relevant context for your question: '{question}'",
             "context": context
         }
 
@@ -175,9 +187,6 @@ async def ask_endpoint(request: AskRequest):
 
 # --- Run the Server ---
 if __name__ == "__main__":
-    """
-    This block allows you to run the server directly from the command line
-    for testing and development.
-    """
+    """This block allows you to run the server directly for development."""
     print("Starting Librarian MCP Server with Uvicorn...")
-    uvicorn.run("mcp_server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("mcp_server:app", host="0.0.0.0", port=8080, reload=True)

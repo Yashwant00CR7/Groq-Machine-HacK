@@ -7,8 +7,13 @@ import os
 import json
 import re
 import asyncio # Import the asyncio library
+import sys
 import traceback # Import the traceback module
 from dotenv import load_dotenv
+
+# Fix for Windows asyncio + Playwright compatibility
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # --- Local Imports from our services module ---
 from services import (

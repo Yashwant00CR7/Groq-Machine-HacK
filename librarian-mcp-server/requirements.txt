@@ -18,3 +18,5 @@ asyncio
 certifi
 fastembed
 langchain-groq
+python-multipart
+nest-asyncio

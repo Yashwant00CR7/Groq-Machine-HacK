@@ -1,5 +1,11 @@
 # --- SSL Certificate Configuration ---
 # This MUST be at the top, before any library that uses httpx/requests is imported.
+import asyncio
+import sys
+
+# This MUST be at the top of your script
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 import os
 import certifi
 os.environ['SSL_CERT_FILE'] = certifi.where()
@@ -18,6 +24,7 @@ import requests
 import re
 import logging
 import asyncio
+import base64
 from typing import Optional, List
 from datetime import datetime, timedelta
 
@@ -26,6 +33,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 import certifi
@@ -45,7 +53,7 @@ from crawl4ai import AsyncWebCrawler
 from crawl4ai.async_configs import CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
-
+import sys
 
 # --- Global Configuration ---
 PINECONE_INDEX_NAME = "mcp-documentation-index-groq"
@@ -55,7 +63,7 @@ MIN_CONTENT_LENGTH_THRESHOLD = 500
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
+from typing import Optional
 
 # --- Pydantic Schema for Rich Data Extraction ---
 class LibraryInfo(BaseModel):
@@ -72,11 +80,9 @@ class LibraryInfo(BaseModel):
     additional_insights: Optional[str] = Field(default=None, description="Important information discovered during low-confidence rescraping.")
 
 # --- Service Initialization, Caching, Confidence Score ---
-
+# ... (All functions from initialize_services to interpret_confidence_score remain unchanged) ...
 def initialize_services():
     """Initializes and returns the core AI and database clients."""
-    
-    # Load API key from groq_api.py
     try:
         import groq_api
     except ImportError:
@@ -87,14 +93,12 @@ def initialize_services():
         raise ValueError("GROQ_API_KEY not set in groq_api.py or still contains placeholder.")
     groq_api_key = api_key.strip()
 
-    # Explicitly pass the API key to the constructor
     llm = ChatGroq(
         groq_api_key=groq_api_key,
         temperature=0,
-        model_name="llama-3.1-8b-instant"
+        model_name="meta-llama/llama-4-scout-17b-16e-instruct"
     )
     
-    # Specify a local cache directory for the embedding model and use a 768-dim model
     cache_dir = os.path.join(os.path.dirname(__file__), ".embeddings_cache")
     os.makedirs(cache_dir, exist_ok=True)
     embeddings_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5", cache_dir=cache_dir)
@@ -115,20 +119,13 @@ def save_to_cache(library_name: str, library_data):
     cache_dir = "cache"
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
-
     safe_filename = _sanitize_filename(library_name)
     cache_file = os.path.join(cache_dir, f"{safe_filename}_cache.json")
-
     if hasattr(library_data, 'model_dump'):
         data_dict = library_data.model_dump()
     else:
         data_dict = library_data
-
-    cache_entry = {
-        "timestamp": datetime.now().isoformat(),
-        "data": data_dict
-    }
-
+    cache_entry = {"timestamp": datetime.now().isoformat(), "data": data_dict}
     try:
         with open(cache_file, 'w', encoding='utf-8') as f:
             json.dump(cache_entry, f, indent=2)
@@ -141,19 +138,15 @@ def load_from_cache(library_name: str, max_age_hours: int = 24):
     cache_dir = "cache"
     safe_filename = _sanitize_filename(library_name)
     cache_file = os.path.join(cache_dir, f"{safe_filename}_cache.json")
-
     if not os.path.exists(cache_file):
         return None
-
     try:
         with open(cache_file, 'r', encoding='utf-8') as f:
             cache_entry = json.load(f)
-
         cache_time = datetime.fromisoformat(cache_entry["timestamp"])
         if datetime.now() - cache_time > timedelta(hours=max_age_hours):
             logger.warning(f"⚠️ Cache expired for '{library_name}' (older than {max_age_hours} hours)")
             return None
-
         logger.info(f"📋 Cache hit for '{library_name}' (age: {datetime.now() - cache_time})")
         return cache_entry["data"]
     except Exception as e:
@@ -164,7 +157,6 @@ def interpret_confidence_score(confidence_score: str) -> str:
     """Provides a human-readable interpretation of the confidence score."""
     if not confidence_score or not confidence_score.strip():
         return "❓ Unknown Confidence Level"
-
     confidence_lower = confidence_score.lower()
     if confidence_lower == "high":
         return "✅ High Confidence - Data is comprehensive and reliable"
@@ -177,6 +169,7 @@ def interpret_confidence_score(confidence_score: str) -> str:
 
 
 # --- Specialist Agent Tools ---
+# ... (All tools remain unchanged) ...
 @tool
 def pypi_api_tool(package_name: str) -> str:
     """Queries the official PyPI API for a Python package's metadata."""
@@ -237,7 +230,6 @@ def web_search_tool(query: str) -> str:
         logger.warning("  -> ⚠️ DuckDuckGo found no valid URLs, falling back to Tavily AI...")
     except Exception as e:
         logger.error(f"  -> ❌ DuckDuckGo search failed: {e}, falling back to Tavily AI...")
-
     try:
         if not os.getenv("TAVILY_API_KEY"):
             return "Error: Tavily API key not found. Please set TAVILY_API_KEY."
@@ -250,8 +242,11 @@ def web_search_tool(query: str) -> str:
         logger.error(f"  -> ❌ Tavily AI search also failed: {e}")
         return f"Both DuckDuckGo and Tavily AI searches failed. Error: {e}"
 
+
+# --- Agent and Data Pipeline Functions ---
 def create_universal_agent(llm):
     """Creates the multi-ecosystem agent with the most robust reasoning process."""
+    # ... (This function remains unchanged) ...
     tools = [pypi_api_tool, npm_api_tool, crates_io_api_tool, web_search_tool]
     prompt = ChatPromptTemplate.from_messages([
         ("system",
@@ -268,11 +263,9 @@ def create_universal_agent(llm):
     agent = create_tool_calling_agent(llm, tools, prompt)
     return AgentExecutor(agent=agent, tools=tools, verbose=True)
 
-
-# --- Data Pipeline Functions ---
-
 def ensure_pinecone_index_ready(pc: Pinecone, embeddings_model):
     """Checks if the Pinecone index exists. If not, creates it and waits until it is ready."""
+    # ... (This function remains unchanged) ...
     logger.info(f"Ensuring Pinecone index '{PINECONE_INDEX_NAME}' is ready...")
     if PINECONE_INDEX_NAME not in pc.list_indexes().names():
         logger.info(f"Index not found. Creating new index '{PINECONE_INDEX_NAME}'...")
@@ -292,6 +285,8 @@ def ensure_pinecone_index_ready(pc: Pinecone, embeddings_model):
     else:
         logger.info("✅ Index already exists and is ready.")
 
+
+# --- Jina AI fetcher (re-enabled as primary) ---
 def _fetch_with_jina(url: str) -> Optional[str]:
     """Fetches clean content using the Jina AI Reader API."""
     try:
@@ -305,89 +300,211 @@ def _fetch_with_jina(url: str) -> Optional[str]:
         logger.error(f"❌ [Primary] Jina AI API request failed: {e}")
         return None
 
+async def _simple_crawl_with_crawl4ai(url: str) -> Optional[str]:
+    """
+    Performs a simple (non-deep) crawl using crawl4ai.
+    Runs in thread pool to avoid Windows asyncio issues.
+    """
+    import concurrent.futures
+    
+    def _run_simple_crawl(url: str) -> Optional[str]:
+        import asyncio
+        import nest_asyncio
+        
+        try:
+            # Enable nested event loops to avoid conflicts
+            nest_asyncio.apply()
+            
+            # Create a new event loop for this operation
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def _crawl():
+                # Simple crawl without deep strategy
+                run_config = CrawlerRunConfig(
+                    markdown_generator=DefaultMarkdownGenerator()
+                )
+                async with AsyncWebCrawler() as crawler:
+                    result = await crawler.arun(url=url, config=run_config)
+                    if result and result.success and result.markdown:
+                        return str(result.markdown)
+                return None
+            
+            # Run the crawl in the new loop
+            result = loop.run_until_complete(_crawl())
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Simple crawl4ai error: {e}")
+            return None
+        finally:
+            try:
+                loop.close()
+            except:
+                pass
+    
+    try:
+        logger.info(f"🔄 [Fallback 1] Attempting simple crawl with crawl4ai for: {url}")
+        
+        # Run simple crawl in thread pool
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(executor, _run_simple_crawl, url)
+        
+        if result:
+            logger.info(f"✅ [Fallback 1] Simple crawl successful. Content extracted from: {url}")
+            return result
+        else:
+            logger.error("❌ [Fallback 1] Simple crawl finished but found no markdown content.")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ [Fallback 1] Simple crawl failed with error: {e}")
+        return None
+
+def _run_crawl4ai_sync(url: str) -> Optional[str]:
+    """
+    Synchronous wrapper for crawl4ai that runs in a new event loop.
+    This avoids Windows asyncio subprocess issues.
+    """
+    import asyncio
+    import nest_asyncio
+    
+    try:
+        # Enable nested event loops to avoid conflicts
+        nest_asyncio.apply()
+        
+        # Create a new event loop for this operation
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def _crawl():
+            strategy = BFSDeepCrawlStrategy(max_depth=1)
+            run_config = CrawlerRunConfig(
+                deep_crawl_strategy=strategy,
+                markdown_generator=DefaultMarkdownGenerator()
+            )
+            all_content = []
+            async with AsyncWebCrawler() as crawler:
+                results = await crawler.arun(url=url, config=run_config)
+                if results:
+                    for result in results:
+                        if result.success and result.markdown:
+                            all_content.append(str(result.markdown))
+            
+            if not all_content:
+                return None
+            
+            return "\n\n--- (New Page Content) ---\n\n".join(all_content)
+        
+        # Run the crawl in the new loop
+        result = loop.run_until_complete(_crawl())
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Crawl4ai error: {e}")
+        return None
+    finally:
+        try:
+            loop.close()
+        except:
+            pass
+
 async def _deep_crawl_with_crawl4ai(url: str) -> Optional[str]:
     """
     Performs a deep crawl starting from the given URL to gather rich context.
+    Runs crawl4ai in a thread pool to avoid Windows asyncio issues.
     """
+    import concurrent.futures
+    
     try:
-        logger.info(f"🤖 [Deep Crawl] Initiating deep crawl for: {url}")
-        strategy = BFSDeepCrawlStrategy(max_depth=1)
-        run_config = CrawlerRunConfig(
-            deep_crawl_strategy=strategy,
-            markdown_generator=DefaultMarkdownGenerator()
-        )
-        all_content = []
-        async with AsyncWebCrawler() as crawler:
-            results = await crawler.arun(url=url, config=run_config)
-            if results:
-                for result in results:
-                    if result.success and result.markdown:
-                        logger.info(f"  -> Crawled and extracted content from: {result.url}")
-                        all_content.append(str(result.markdown))
+        logger.info(f"🤖 [Fallback 2] Initiating deep crawl for: {url}")
         
-        if not all_content:
-            logger.error("❌ Deep crawl finished but found no markdown content.")
+        # Run crawl4ai in a thread pool to avoid asyncio subprocess issues on Windows
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(executor, _run_crawl4ai_sync, url)
+        
+        if result:
+            logger.info(f"✅ [Fallback 2] Deep crawl successful. Content extracted from: {url}")
+            return result
+        else:
+            logger.error("❌ [Fallback 2] Deep crawl finished but found no markdown content.")
             return None
-        
-        logger.info(f"✅ Deep crawl successful. Aggregated content from {len(all_content)} pages.")
-        return "\n\n--- (New Page Content) ---\n\n".join(all_content)
+            
     except Exception as e:
-        logger.error(f"❌ Deep crawl failed with a critical error: {e}")
+        logger.error(f"❌ [Fallback 2] Deep crawl failed with a critical error: {e}")
         return None
-
+    
 async def get_clean_content(doc_url: str) -> Optional[str]:
     """
-    Hybrid content fetcher. First tries Jina AI, then falls back to a deep
-    crawl with Crawl4ai if Jina fails.
+    Fetches clean content with a 3-tier fallback system:
+    1. Primary: Jina AI Reader (fast, clean)
+    2. Fallback 1: Simple crawl4ai (medium complexity)
+    3. Fallback 2: Deep crawl4ai (comprehensive but slower)
     """
+    # --- TIER 1: Primary - Jina AI Reader ---
+    logger.info("🧼 [Primary] Trying Jina AI Reader...")
     jina_content = _fetch_with_jina(doc_url)
     if jina_content and len(jina_content) >= MIN_CONTENT_LENGTH_THRESHOLD:
-        logger.info("Jina AI content is valid and of sufficient length.")
+        logger.info("✅ [Primary] Jina AI content is valid and of sufficient length.")
         return jina_content
+    
+    logger.warning("⚠️ [Primary] Jina AI failed or content was too short. Trying simple crawl4ai...")
+    
+    # --- TIER 2: Fallback 1 - Simple crawl4ai ---
+    simple_content = await _simple_crawl_with_crawl4ai(doc_url)
+    if simple_content and len(simple_content) >= MIN_CONTENT_LENGTH_THRESHOLD:
+        logger.info("✅ [Fallback 1] Simple crawl4ai content is valid and of sufficient length.")
+        return simple_content
+    
+    logger.warning("⚠️ [Fallback 1] Simple crawl4ai failed or content was too short. Trying deep crawl...")
+    
+    # --- TIER 3: Fallback 2 - Deep crawl4ai ---
+    logger.info("🤖 [Fallback 2] Using deep crawl as final attempt...")
+    deep_content = await _deep_crawl_with_crawl4ai(doc_url)
+    if deep_content:
+        logger.info("✅ [Fallback 2] Deep crawl successful - returning content.")
+        return deep_content
+    
+    # --- All methods failed ---
+    logger.error("❌ All content fetching methods failed. No content available.")
+    return None
 
-    logger.warning("Jina API failed or content was too short. Triggering deep crawl fallback.")
-    return await _deep_crawl_with_crawl4ai(doc_url)
 
+# ... (All other functions like ingest_documentation, extract_structured_info, etc. remain unchanged) ...
 async def ingest_documentation(library_name: str, doc_url: str, embeddings_model, content_to_ingest: Optional[str] = None):
     """
     Deletes old vectors for the library, then gets clean content and stores the new vectors.
     """
     logger.info(f"\n📚 Starting ingestion for '{library_name}'...")
     doc_id = f"lib-{_sanitize_filename(library_name)}"
-    
     try:
         logger.info(f"🧹 Deleting old vectors with doc_id: '{doc_id}'...")
         vectorstore = PineconeVectorStore.from_existing_index(PINECONE_INDEX_NAME, embeddings_model)
         vectorstore.delete(filter={"doc_id": doc_id})
         logger.info("✅ Old vectors deleted successfully.")
     except Exception as e:
-        # Check if it's a "Namespace not found" error (Pinecone error code 5)
         if "Namespace not found" in str(e) or "code" in str(e) and "5" in str(e):
             logger.info("ℹ️ No existing vectors found (namespace doesn't exist yet). Skipping deletion.")
         else:
             logger.warning(f"⚠️ Could not delete old vectors: {e}")
-
-    # Use pre-fetched content if provided, otherwise fetch it.
     if content_to_ingest is None:
         content_string = await get_clean_content(doc_url)
     else:
         logger.info("Using pre-fetched content for ingestion.")
         content_string = content_to_ingest
-
     if not content_string:
         logger.error("❌ Halting ingestion as no content was provided or could be fetched.")
         return False
-
     try:
         base_doc = Document(page_content=content_string, metadata={"source": doc_url})
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=2000, chunk_overlap=200, separators=["\n\n", "\n", " ", ""]
         )
         splits = text_splitter.split_documents([base_doc])
-        
         for split in splits:
             split.metadata["doc_id"] = doc_id
-
         logger.info(f"Embedding {len(splits)} new document chunks and storing in Pinecone...")
         await PineconeVectorStore.afrom_documents(splits, embeddings_model, index_name=PINECONE_INDEX_NAME)
         logger.info("✅ New content ingested successfully.")
@@ -402,65 +519,43 @@ async def extract_structured_info(library_name: str, llm, embeddings_model, doc_
     Implements a two-stage fallback for low-confidence results.
     """
     logger.info(f"\n⛏️ Starting structured info extraction for '{library_name}'...")
-
     try:
-        # --- Stage 1: Quick Pass with Initial Content ---
         logger.info("--- Stage 1: Performing initial RAG extraction ---")
         initial_content = await get_clean_content(doc_url)
         if not initial_content:
             logger.error("Initial content fetch failed. Cannot proceed with extraction.")
             return LibraryInfo(library_name=library_name, confidence_score="Low", additional_insights="Initial content scraping failed.")
-
         ingestion_success = await ingest_documentation(library_name, doc_url, embeddings_model, content_to_ingest=initial_content)
         if not ingestion_success:
              return LibraryInfo(library_name=library_name, confidence_score="Low", additional_insights="Initial content ingestion failed.")
-
-
         vectorstore = PineconeVectorStore.from_existing_index(PINECONE_INDEX_NAME, embeddings_model)
         retriever = vectorstore.as_retriever(search_kwargs={'k': 8})
-        
         docs = await retriever.ainvoke(f"Information about {library_name} including purpose, installation, version, and deprecation notices.")
         context_text = "\n\n".join([doc.page_content for doc in docs])
-
         if not context_text:
             logger.warning(f"⚠️ Could not retrieve any context for '{library_name}' from Pinecone.")
             return LibraryInfo(library_name=library_name, confidence_score="Low", documentation_url=doc_url)
-
         structured_llm = llm.with_structured_output(LibraryInfo)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert at extracting key information..."),
-            ("human", "Extract the required information about '{topic}'... Context:\n{context}")
+            ("system", "You are an expert at extracting key information about software libraries from provided text. Your job is to fill in the fields of the 'LibraryInfo' structure as accurately as possible based *only* on the context. If a piece of information (like a version number or installation command) is not present in the text, leave the field empty. Do not invent or guess information. At the end, you MUST provide a confidence score ('High', 'Medium', or 'Low') based on how much information you could find."),
+            ("human", "Please extract the required information about the software library '{topic}' from the following documentation content. \n\nContext:\n{context}")
         ])
-
         chain = prompt | structured_llm
         initial_response = await chain.ainvoke({"topic": library_name, "context": context_text})
-
         if initial_response and doc_url:
             initial_response.documentation_url = doc_url
-        
-        # --- Stage 2: Confidence Check and Deep Crawl Fallback ---
         is_confident = initial_response.confidence_score and initial_response.confidence_score.lower() in ["high", "medium"]
-
         if not is_confident:
             logger.warning(f"⚠️ Low or Unknown confidence for '{library_name}'. Triggering deep crawl fallback...")
-            
-            # This is where the deep crawl was intended but the logic was flawed.
-            # We now perform the deep crawl and then re-run the extraction.
             rich_content = await _deep_crawl_with_crawl4ai(doc_url)
-            
             if rich_content:
                 logger.info("--- Stage 2: Re-ingesting with richer content from deep crawl ---")
                 reingestion_success = await ingest_documentation(library_name, doc_url, embeddings_model, content_to_ingest=rich_content)
-                
                 if reingestion_success:
                     logger.info("--- Stage 2: Re-running structured extraction with new context ---")
-                    # Retrieve the new, richer context
                     new_docs = await retriever.ainvoke(f"Information about {library_name} including purpose, installation, and version.")
                     new_context_text = "\n\n".join([doc.page_content for doc in new_docs])
-                    
-                    # Re-run the extraction chain
                     final_response = await chain.ainvoke({"topic": library_name, "context": new_context_text})
-                    
                     if final_response:
                         final_response.documentation_url = doc_url
                         final_response.additional_insights = (
@@ -469,13 +564,10 @@ async def extract_structured_info(library_name: str, llm, embeddings_model, doc_
                         )
                         logger.info("✅ Structured information extracted successfully after deep crawl.")
                         return final_response
-            
             logger.error("❌ Deep crawl fallback failed to produce better results. Returning initial low-confidence data.")
-            return initial_response # Return the first result if deep crawl fails
-
+            return initial_response
         logger.info("✅ Structured information extracted successfully on the first pass.")
         return initial_response
-
     except Exception as e:
         logger.error(f"❌ A critical error occurred during structured data extraction: {e}")
         return LibraryInfo(
@@ -491,10 +583,8 @@ def find_documentation_url(agent_executor, library_name: str) -> str | None:
     """
     logger.info(f"\n🕵️ Agent is searching for documentation for '{library_name}'...")
     try:
-        # Agent invocation is synchronous
         response = agent_executor.invoke({"input": f"Find the documentation URL for the {library_name} library."})
         output = response.get("output", "")
-        
         url_match = re.search(r'https?://[^\s,"]+', output)
         if url_match:
             doc_url = url_match.group(0).strip().strip(' ./\t\n')
@@ -503,7 +593,63 @@ def find_documentation_url(agent_executor, library_name: str) -> str | None:
         else:
             logger.error(f"❌ Agent failed to find a valid URL in its output: {output}")
             return None
-            
     except Exception as e:
         logger.error(f"❌ An error occurred while the agent was searching: {e}")
+        return None
+
+# --- Image Processing Service ---
+async def process_image_and_identify_library(llm: ChatGroq, image_bytes: bytes, prompt: str) -> Optional[str]:
+    """
+    Processes an image to identify a software library using a multimodal LLM.
+    """
+    logger.info("🖼️ Processing image to identify software library...")
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+    message = HumanMessage(
+        content=[
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+        ]
+    )
+    try:
+        response = await llm.ainvoke([message])
+        identified_name = response.content.strip()
+        if identified_name:
+            logger.info(f"✅ Library identified from image: '{identified_name}'")
+            return identified_name
+        else:
+            logger.warning("⚠️ LLM responded but did not identify a library name from the image.")
+            return None
+    except Exception as e:
+        logger.error(f"❌ An error occurred during image processing with the LLM: {e}")
+        return None
+
+# --- Main Pipeline Orchestrator ---
+async def run_full_pipeline(library_name: str, llm, embeddings_model, pc) -> Optional[dict]:
+    """
+    Runs the full text-based pipeline for a given library name.
+    """
+    logger.info(f"\n🚀 Starting Full Pipeline for: '{library_name}'")
+    cached_data = load_from_cache(library_name)
+    if cached_data:
+        logger.info("✅ Cache Hit! Returning cached data.")
+        return cached_data
+
+    logger.info("⚠️ Cache Miss. Deploying agent to find documentation URL...")
+    agent_executor = create_universal_agent(llm)
+    doc_url = find_documentation_url(agent_executor, library_name)
+    
+    if not doc_url:
+        logger.error(f"❌ Halting pipeline: Agent failed to find a valid URL for '{library_name}'.")
+        return None
+    
+    library_data_model = await extract_structured_info(library_name, llm, embeddings_model, doc_url)
+
+    if library_data_model:
+        info_dict = library_data_model.model_dump()
+        if library_data_model.confidence_score and library_data_model.confidence_score.lower() in ["high", "medium"]:
+            save_to_cache(library_name, info_dict)
+        else:
+            logger.warning(f"Skipping cache for '{library_name}' due to low or unknown confidence.")
+        return info_dict
+    else:
         return None
