@@ -82,7 +82,7 @@ class LibraryInfo(BaseModel):
 # --- Service Initialization, Caching, Confidence Score ---
 # ... (All functions from initialize_services to interpret_confidence_score remain unchanged) ...
 def initialize_services():
-    """Initializes and returns the core AI and database clients."""
+    """Initializes and returns the core AI and database clients with separate text and vision models."""
     try:
         import groq_api
     except ImportError:
@@ -93,10 +93,18 @@ def initialize_services():
         raise ValueError("GROQ_API_KEY not set in groq_api.py or still contains placeholder.")
     groq_api_key = api_key.strip()
 
-    llm = ChatGroq(
+    # Text processing model (basic, fast, cost-effective)
+    text_llm = ChatGroq(
         groq_api_key=groq_api_key,
         temperature=0,
-        model_name="meta-llama/llama-4-scout-17b-16e-instruct"
+        model_name="llama-3.1-8b-instant"  # Basic Groq model for text processing
+    )
+    
+    # Vision model for image processing
+    vision_llm = ChatGroq(
+        groq_api_key=groq_api_key,
+        temperature=0,
+        model_name="meta-llama/llama-4-scout-17b-16e-instruct"  # Vision-capable model for images
     )
     
     cache_dir = os.path.join(os.path.dirname(__file__), ".embeddings_cache")
@@ -108,7 +116,7 @@ def initialize_services():
         raise ValueError("PINECONE_API_KEY environment variable not set.")
     pc = Pinecone(api_key=pinecone_api_key)
     
-    return llm, embeddings_model, pc
+    return text_llm, vision_llm, embeddings_model, pc
 
 def _sanitize_filename(name: str) -> str:
     """Replaces characters that are invalid in file names."""
@@ -598,11 +606,12 @@ def find_documentation_url(agent_executor, library_name: str) -> str | None:
         return None
 
 # --- Image Processing Service ---
-async def process_image_and_identify_library(llm: ChatGroq, image_bytes: bytes, prompt: str) -> Optional[str]:
+async def process_image_and_identify_library(vision_llm: ChatGroq, image_bytes: bytes, prompt: str) -> Optional[str]:
     """
-    Processes an image to identify a software library using a multimodal LLM.
+    Processes an image to identify a software library using a vision-capable LLM.
+    Uses the dedicated vision model (llama-3.2-11b-vision-preview) for image processing.
     """
-    logger.info("🖼️ Processing image to identify software library...")
+    logger.info("🖼️ Processing image to identify software library with vision model...")
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')
     message = HumanMessage(
         content=[
@@ -611,38 +620,38 @@ async def process_image_and_identify_library(llm: ChatGroq, image_bytes: bytes, 
         ]
     )
     try:
-        response = await llm.ainvoke([message])
+        response = await vision_llm.ainvoke([message])
         identified_name = response.content.strip()
         if identified_name:
             logger.info(f"✅ Library identified from image: '{identified_name}'")
             return identified_name
         else:
-            logger.warning("⚠️ LLM responded but did not identify a library name from the image.")
+            logger.warning("⚠️ Vision model responded but did not identify a library name from the image.")
             return None
     except Exception as e:
-        logger.error(f"❌ An error occurred during image processing with the LLM: {e}")
+        logger.error(f"❌ An error occurred during image processing with the vision model: {e}")
         return None
 
 # --- Main Pipeline Orchestrator ---
-async def run_full_pipeline(library_name: str, llm, embeddings_model, pc) -> Optional[dict]:
+async def run_full_pipeline(library_name: str, text_llm, embeddings_model, pc) -> Optional[dict]:
     """
-    Runs the full text-based pipeline for a given library name.
+    Runs the full text-based pipeline for a given library name using the text model.
     """
-    logger.info(f"\n🚀 Starting Full Pipeline for: '{library_name}'")
+    logger.info(f"\n🚀 Starting Full Pipeline for: '{library_name}' (using text model)")
     cached_data = load_from_cache(library_name)
     if cached_data:
         logger.info("✅ Cache Hit! Returning cached data.")
         return cached_data
 
     logger.info("⚠️ Cache Miss. Deploying agent to find documentation URL...")
-    agent_executor = create_universal_agent(llm)
+    agent_executor = create_universal_agent(text_llm)
     doc_url = find_documentation_url(agent_executor, library_name)
     
     if not doc_url:
         logger.error(f"❌ Halting pipeline: Agent failed to find a valid URL for '{library_name}'.")
         return None
     
-    library_data_model = await extract_structured_info(library_name, llm, embeddings_model, doc_url)
+    library_data_model = await extract_structured_info(library_name, text_llm, embeddings_model, doc_url)
 
     if library_data_model:
         info_dict = library_data_model.model_dump()
@@ -653,3 +662,54 @@ async def run_full_pipeline(library_name: str, llm, embeddings_model, pc) -> Opt
         return info_dict
     else:
         return None
+
+# --- Question Answering Service ---
+async def answer_question(library_name: str, question: str, text_llm, embeddings_model) -> dict:
+    """
+    Answers a question about a library using RAG with the text model.
+    """
+    try:
+        vectorstore = PineconeVectorStore.from_existing_index(
+            index_name=PINECONE_INDEX_NAME,
+            embedding=embeddings_model
+        )
+
+        doc_id = f"lib-{_sanitize_filename(library_name)}"
+        retriever = vectorstore.as_retriever(
+            search_kwargs={'k': 5, 'filter': {'doc_id': doc_id}}
+        )
+
+        docs = await retriever.ainvoke(question)
+
+        if not docs:
+            return {
+                "answer": f"I could not find any relevant information about '{library_name}' in the documentation. It might not have been processed yet or the name is incorrect.",
+                "sources": []
+            }
+
+        context = "\n\n---\n\n".join([doc.page_content for doc in docs])
+        
+        # Use text model to generate a natural language answer
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful documentation assistant. Based on the provided context from software documentation, answer the user's question accurately and concisely. If the context doesn't contain enough information to answer the question, say so clearly."),
+            ("human", "Context from {library_name} documentation:\n\n{context}\n\nQuestion: {question}")
+        ])
+        
+        chain = prompt | text_llm
+        response = await chain.ainvoke({
+            "library_name": library_name,
+            "context": context,
+            "question": question
+        })
+        
+        return {
+            "answer": response.content.strip(),
+            "sources": [doc.metadata.get("source", "Unknown") for doc in docs[:3]]  # Top 3 sources
+        }
+
+    except Exception as e:
+        logger.error(f"Error during question answering for '{library_name}': {e}")
+        return {
+            "answer": f"An error occurred while processing your question: {str(e)}",
+            "sources": []
+        }

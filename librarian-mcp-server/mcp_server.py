@@ -3,6 +3,7 @@
 # as a Model Context Protocol (MCP) server.
 import asyncio
 import sys
+import signal
 
 # FIX: For Playwright/asyncio issues on Windows
 if sys.platform == "win32":
@@ -21,6 +22,7 @@ from services import (
     ensure_pinecone_index_ready,
     run_full_pipeline,
     process_image_and_identify_library,
+    answer_question,
     logger,
     PineconeVectorStore,
     _sanitize_filename,
@@ -41,6 +43,17 @@ class AskRequest(BaseModel):
 # This dictionary will hold our initialized services.
 server_state = {}
 
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    print(f"\n--- Received signal {signum}, shutting down gracefully ---")
+    server_state.clear()
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+if hasattr(signal, 'SIGTERM'):
+    signal.signal(signal.SIGTERM, signal_handler)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -50,24 +63,29 @@ async def lifespan(app: FastAPI):
     load_dotenv()
     
     try:
-        llm, embeddings_model, pc = initialize_services()
+        text_llm, vision_llm, embeddings_model, pc = initialize_services()
         ensure_pinecone_index_ready(pc, embeddings_model)
         
         # Store the initialized services in the global state
-        server_state["llm"] = llm
+        server_state["text_llm"] = text_llm
+        server_state["vision_llm"] = vision_llm
         server_state["embeddings_model"] = embeddings_model
         server_state["pc"] = pc
         
         print("--- Models and services initialized. Server is ready. ---")
+        print("🧼 Text Model: llama-3.1-8b-instant (basic, fast)")
+        print("🖼️ Vision Model: llama-3.2-11b-vision-preview (image processing)")
         print("🌐 Server URL: http://localhost:8080")
         print("📖 API Documentation: http://localhost:8080/docs")
+        
+        yield  # Server is running
+        
     except Exception as e:
         logger.critical(f"FATAL: Server startup failed during initialization: {e}")
-    
-    yield
-    
-    print("--- Server is shutting down... ---")
-    server_state.clear()
+        raise
+    finally:
+        print("--- Server is shutting down... ---")
+        server_state.clear()
 
 
 # --- FastAPI Application ---
@@ -95,7 +113,7 @@ async def process_text_endpoint(request: ProcessRequest):
     try:
         result = await run_full_pipeline(
             library_name=library_name,
-            llm=server_state["llm"],
+            text_llm=server_state["text_llm"],
             embeddings_model=server_state["embeddings_model"],
             pc=server_state["pc"]
         )
@@ -117,9 +135,9 @@ async def process_image_endpoint(prompt: str = Form("Identify the primary softwa
         # Read image bytes from the uploaded file
         image_bytes = await image.read()
 
-        # 1. Identify the library name from the image
+        # 1. Identify the library name from the image using vision model
         identified_name = await process_image_and_identify_library(
-            llm=server_state["llm"],
+            vision_llm=server_state["vision_llm"],
             image_bytes=image_bytes,
             prompt=prompt
         )
@@ -129,10 +147,10 @@ async def process_image_endpoint(prompt: str = Form("Identify the primary softwa
 
         logger.info(f"Image identified as '{identified_name}'. Starting full pipeline...")
 
-        # 2. Run the full text-based pipeline with the identified name
+        # 2. Run the full text-based pipeline with the identified name using text model
         result = await run_full_pipeline(
             library_name=identified_name,
-            llm=server_state["llm"],
+            text_llm=server_state["text_llm"],
             embeddings_model=server_state["embeddings_model"],
             pc=server_state["pc"]
         )
@@ -149,36 +167,20 @@ async def process_image_endpoint(prompt: str = Form("Identify the primary softwa
 @app.post("/ask", response_model=dict)
 async def ask_endpoint(request: AskRequest):
     """
-    This is the RAG endpoint. It answers a question about a library.
+    This is the RAG endpoint. It answers a question about a library using the text model.
     """
     library_name = request.library_name
     question = request.question
-    logger.info(f"Received question about '{library_name}': '{question}'")
+    logger.info(f"Received question about '{library_name}': '{question}' (using text model)")
 
     try:
-        vectorstore = PineconeVectorStore.from_existing_index(
-            index_name=PINECONE_INDEX_NAME,
-            embedding=server_state["embeddings_model"]
+        result = await answer_question(
+            library_name=library_name,
+            question=question,
+            text_llm=server_state["text_llm"],
+            embeddings_model=server_state["embeddings_model"]
         )
-
-        doc_id = f"lib-{_sanitize_filename(library_name)}"
-        retriever = vectorstore.as_retriever(
-            search_kwargs={'k': 5, 'filter': {'doc_id': doc_id}}
-        )
-
-        docs = await retriever.ainvoke(question)
-
-        if not docs:
-            return {"answer": "I could not find any relevant information in the documentation for that library. It might not have been processed yet or the name is incorrect."}
-
-        context = "\n\n---\n\n".join([doc.page_content for doc in docs])
-        
-        # Here you would typically pass the context and question to an LLM to generate a natural language answer.
-        # For this example, we return the raw context.
-        return {
-            "answer": f"Based on the documentation for {library_name}, here is some relevant context for your question: '{question}'",
-            "context": context
-        }
+        return result
 
     except Exception as e:
         logger.error(f"Error during RAG retrieval for '{library_name}': {e}")
@@ -188,5 +190,18 @@ async def ask_endpoint(request: AskRequest):
 # --- Run the Server ---
 if __name__ == "__main__":
     """This block allows you to run the server directly for development."""
-    print("Starting Librarian MCP Server with Uvicorn...")
-    uvicorn.run("mcp_server:app", host="0.0.0.0", port=8080, reload=True)
+    try:
+        print("Starting Librarian MCP Server with Uvicorn...")
+        uvicorn.run(
+            "mcp_server:app", 
+            host="0.0.0.0", 
+            port=8080, 
+            reload=True,
+            access_log=False,
+            log_level="info"
+        )
+    except KeyboardInterrupt:
+        print("\n--- Server stopped by user ---")
+    except Exception as e:
+        print(f"--- Server failed to start: {e} ---")
+        raise
