@@ -20,3 +20,5 @@ fastembed
 langchain-groq
 python-multipart
 nest-asyncio
+fastmcp
+httpx
